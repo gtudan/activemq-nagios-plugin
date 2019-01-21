@@ -52,11 +52,11 @@ def query_url(args, operation='read', dest=''):
 
 
 def queue_url(args, queue):
-    return query_url(args, ',destinationType=Queue,destinationName=' + urllib3.quote(queue))
+    return query_url(args, ',destinationType=Queue,destinationName="' + queue + '"')
 
 
 def topic_url(args, topic):
-    return query_url(args, ',destinationType=Topic,destinationName=' + urllib3.quote(topic))
+    return query_url(args, ',destinationType=Topic,destinationName="' + topic + '"')
 
 
 def health_url(args):
@@ -625,7 +625,7 @@ def main():
                 is a subscriber of the specified 'topic'.""")
     parser_subscriber.add_argument('--clientId', required=True,
                                    help='Client ID of the client that will be checked')
-    parser_subscriber.add_argument('--topic', required=True,
+    parser_subscriber.add_argument('topic',
                                    help='Name of the Topic that will be checked.')
     parser_subscriber.set_defaults(func=subscriber)
 
@@ -674,7 +674,7 @@ def main():
         global args_timeout
         args_timeout = args.timeout
         args.func(args)
-    except AttributeError:  # https://bugs.python.org/issue16308
+    except AttributeError as exception:  # https://bugs.python.org/issue16308
         parser.print_help()
         exit(3)
 
