@@ -52,20 +52,20 @@ def query_url(args, operation='read', dest=''):
 
 
 def queue_url(args, queue):
-    return query_url(args, ',destinationType=Queue,destinationName="' + queue + '"')
+    return query_url(args, 'read', ',component=addresses,address="{}",subcomponent=queues,routing-type="anycast",queue="{}"'.format(queue, queue))
 
 
 def topic_url(args, topic):
-    return query_url(args, ',destinationType=Topic,destinationName="' + topic + '"')
+    return query_url(args, 'read', ',component=addresses,address="{}",subcomponent=queues,routing-type="multicast",queue="{}"'.format(topic, topic))
 
 
 def health_url(args):
     return query_url(args, 'read', '/Started')
 
 
-def load_json(srcurl):
+def load_json(url):
     try:
-        r = requests.get(srcurl, timeout=args_timeout, verify=False)
+        r = requests.get(url, timeout=args_timeout, verify=False)
         return r.json() if r.status_code == requests.codes.ok else None
     except:
         return None
@@ -89,7 +89,7 @@ def queue_oldestmsg_timestamp(args, queue):
             return msg_ts if msg_json else None
 
 
-def queueage(args):
+def queue_age(args):
     class ActiveMqQueueAgeContext(np.ScalarContext):
 
         def evaluate(self, metric, resource):
@@ -381,12 +381,12 @@ def exists(args):
     class ActiveMqExists(np.Resource):
         def probe(self):
             try:
-                respQ = load_json(queue_url(args, args.name))
-                if respQ['status'] == 200:
+                response_queue = load_json(queue_url(args, args.name))
+                if response_queue['status'] == 200:
                     return np.Metric('exists', 1, context='exists')
 
-                respT = load_json(topic_url(args, args.name))
-                if respT['status'] == 200:
+                response_topic = load_json(topic_url(args, args.name))
+                if response_topic['status'] == 200:
                     return np.Metric('exists', 2, context='exists')
 
                 return np.Metric('exists', 0, context='exists')
@@ -521,9 +521,9 @@ def dlq(args):
     class ActiveMqDlqSummary(np.Summary):
         def ok(self, results):
             if len(results) > 1:
-                lenQ = str(len(results))
+                length_queue = str(len(results))
                 bigger = str(len([r.metric.value for r in results if r.metric.value > 0]))
-                return 'Checked ' + lenQ + ' DLQs of which ' + bigger + ' contain additional messages.'
+                return 'Checked ' + length_queue + ' DLQs of which ' + bigger + ' contain additional messages.'
             else:
                 return super(ActiveMqDlqSummary, self).ok(results)
 
@@ -596,7 +596,7 @@ def main():
                 This also can be a Unix shell-style Wildcard
                 (much less powerful than a RegEx)
                 where * and ? can be used.''')
-    parser_queueage.set_defaults(func=queueage)
+    parser_queueage.set_defaults(func=queue_age)
 
     # Sub-Parser for queuesize
     parser_queuesize = subparsers.add_parser('queuesize',
@@ -670,13 +670,9 @@ def main():
     # Evaluate Arguments
     args = parser.parse_args()
     # call the determined function with the parsed arguments
-    try:
-        global args_timeout
-        args_timeout = args.timeout
-        args.func(args)
-    except AttributeError as exception:  # https://bugs.python.org/issue16308
-        parser.print_help()
-        exit(3)
+    global args_timeout
+    args_timeout = args.timeout
+    args.func(args)
 
 
 if __name__ == '__main__':
