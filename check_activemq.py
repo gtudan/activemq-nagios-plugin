@@ -44,7 +44,8 @@ def make_url(args, dest):
 
 def queues_url(args):
     json_params = json.dumps({"operation": "", "field": "", "value": ""})
-    return query_url(args, operation='exec', dest='/listQueues(java.lang.String,int,int)/{}/{}/{}'.format(json_params, 1, 1000))
+    return query_url(args, operation='exec',
+                     dest='/listQueues(java.lang.String,int,int)/{}/{}/{}'.format(json_params, 1, 1000))
 
 
 def query_url(args, operation='read', dest=''):
@@ -52,11 +53,15 @@ def query_url(args, operation='read', dest=''):
 
 
 def queue_url(args, queue):
-    return query_url(args, 'read', ',component=addresses,address="{}",subcomponent=queues,routing-type="anycast",queue="{}"'.format(queue, queue))
+    query = ',component=addresses,address="{}",subcomponent=queues,routing-type="anycast",queue="{}"'.format(queue,
+                                                                                                             queue)
+    return query_url(args, 'read', query)
 
 
 def topic_url(args, topic):
-    return query_url(args, 'read', ',component=addresses,address="{}",subcomponent=queues,routing-type="multicast",queue="{}"'.format(topic, topic))
+    query = ',component=addresses,address="{}",subcomponent=queues,routing-type="multicast",queue="{}"'.format(topic,
+                                                                                                               topic)
+    return query_url(args, 'read', query)
 
 
 def health_url(args):
