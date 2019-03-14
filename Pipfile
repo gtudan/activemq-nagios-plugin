@@ -7,6 +7,5 @@ name = "pypi"
 requests = "*"
 nagiosplugin = "*"
 
-
 [dev-packages]
 pylint = "*"

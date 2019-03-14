@@ -5,13 +5,17 @@ import fnmatch
 import os
 import os.path as path
 import json
+from builtins import staticmethod
+
 import requests
 import urllib3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import nagiosplugin as np
 
-"""    Copyright 2015 predic8 GmbH, www.predic8.com
+""" 
+    Copyright 2019 VisualVest   
+    Copyright 2015 predic8 GmbH, www.predic8.com
 
     Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
@@ -76,22 +80,25 @@ def load_json(url):
         return None
 
 
-def queue_oldestmsg_timestamp(args, queue):
-    url = (("https://" if args.ssl else "http://") + args.host + ":" + str(args.port) + "/api/jolokia")
-    params = {'maxDepth': '10', 'maxCollectionSize': '1', 'ignoreErrors': 'true'}
-    headers = {'content-type': 'application/json'}
-    data = {"type": "exec",
-            "mbean": "org.apache.activemq:type=Broker,brokerName=localhost,destinationType=Queue,destinationName=" + queue,
-            "operation": "browseMessages()"}
-    r = requests.post(url, params=params, auth=(args.user, args.pwd), headers=headers, data=json.dumps(data),
-                      timeout=args_timeout)
+def parse_iso_date(iso_date_string):
+    k = iso_date_string.rfind(":")
+    iso_date_string = iso_date_string[:k] + iso_date_string[k + 1:]
+    return datetime.strptime(iso_date_string, "%Y-%m-%dT%H:%M:%S%z")
 
-    if r.status_code == requests.codes.ok:
-        if r.json()['status'] == 200:
-            msg_json = r.json()['value']
-            msg_javats = msg_json[0]['jMSTimestamp'] if msg_json else 0
-            msg_ts = datetime.utcfromtimestamp(msg_javats / 1000)
-            return msg_ts if msg_json else None
+
+def queue_oldest_msg_timestamp(args, queue):
+    query = ',component=addresses,address="{}",subcomponent=queues,routing-type="anycast",queue="{}"/browse(int,int)/{}/{}'.format(
+        queue, queue, 1, 1)
+    messages = load_json(query_url(args, operation='exec', dest=query))
+
+    if not (messages and messages['value']):
+        # yield np.Metric('Getting Queue(s) FAILED: failed response', -1, context='age')
+        return
+
+    if len(messages['value']) == 0:
+        return None
+    else:
+        return parse_iso_date(messages['value'][0]['timestamp'])
 
 
 def queue_age(args):
@@ -101,28 +108,29 @@ def queue_age(args):
             if metric.value < 0:
                 return self.result_cls(np.Unknown, metric=metric)
 
+            delta = timedelta(minutes=metric.value)
             # CRITICAL
             if metric.value >= self.critical.end:
                 if args.queue:
-                    return self.result_cls(np.Critical, 'Queue %s is %d minutes old (W=%d,C=%d)' %
-                                           (args.queue, metric.value, self.warning.end, self.critical.end), metric)
+                    return self.result_cls(np.Critical, 'Queue %s is %s old (W=%d,C=%d)' %
+                                           (args.queue, delta, self.warning.end, self.critical.end), metric)
                 else:
-                    return self.result_cls(np.Critical, 'Some queue is %d minutes old (W=%d,C=%d)' %
-                                           (metric.value, self.warning.end, self.critical.end), metric)
+                    return self.result_cls(np.Critical, 'Some queue is %s old (W=%d,C=%d)' %
+                                           (delta, self.warning.end, self.critical.end), metric)
 
             # WARNING
             if metric.value >= self.warning.end:
                 if args.queue:
-                    return self.result_cls(np.Warn, 'Queue %s is %d minutes old (W=%d,C=%d)' %
-                                           (args.queue, metric.value, self.warning.end, self.critical.end), metric)
+                    return self.result_cls(np.Warn, 'Queue %s is %s old (W=%d,C=%d)' %
+                                           (args.queue, delta, self.warning.end, self.critical.end), metric)
                 else:
-                    return self.result_cls(np.Warn, 'Some queue is %d minutes old (W=%d,C=%d)' %
-                                           (metric.value, self.warning.end, self.critical.end), metric)
+                    return self.result_cls(np.Warn, 'Some queue is %s old (W=%d,C=%d)' %
+                                           (delta, self.warning.end, self.critical.end), metric)
 
             # OK
             if args.queue:
-                return self.result_cls(np.Ok, 'Queue %s is %d minutes old (W=%d,C=%d)' %
-                                       (args.queue, metric.value, self.warning.end, self.critical.end), metric)
+                return self.result_cls(np.Ok, 'Queue %s is %s old (W=%d,C=%d)' %
+                                       (args.queue, delta, self.warning.end, self.critical.end), metric)
             else:
                 return self.result_cls(np.Ok, 'All queues are younger than %d minutes (W=%d,C=%d)' %
                                        (self.warning.end, self.warning.end, self.critical.end), metric)
@@ -143,17 +151,17 @@ def queue_age(args):
 
         def probe(self):
             try:
-                utcnow = datetime.utcnow()
-                queues_json = load_json(query_url(args))
-                if not queues_json:
+                now = datetime.now().astimezone()
+                queues_json = load_json(queues_url(args))
+                if not (queues_json and queues_json['value']):
                     yield np.Metric('Getting Queue(s) FAILED: failed response', -1, context='age')
                     return
-                for queue in queues_json['value']['Queues']:
-                    queue_name = queue['objectName'].split(',')[1].split('=')[1]
+                for queue in json.loads(queues_json['value'])['data']:
+                    queue_name = queue['name']
                     if self.pattern and fnmatch.fnmatch(queue_name, self.pattern) or not self.pattern:
-                        queue_oldest_time = queue_oldestmsg_timestamp(args, queue_name)
-                        queue_oldest_time = queue_oldest_time if queue_oldest_time else utcnow
-                        queue_age_minutes = int((utcnow - queue_oldest_time).total_seconds() // 60)
+                        queue_oldest_time = queue_oldest_msg_timestamp(args, queue_name)
+                        queue_oldest_time = queue_oldest_time if queue_oldest_time else now
+                        queue_age_minutes = int((now - queue_oldest_time).total_seconds() / 60)
 
                         yield np.Metric('Minutes', queue_age_minutes, min=0, context='age')
             except IOError as e:
@@ -171,8 +179,7 @@ def queue_age(args):
                     ' BUT values retrieved via JSP pages due to: %s' % '')
 
         def problem(self, results):
-            return results.first_significant.hint + (
-                    ' and values retrieved via JSP pages due to: %s' % '') if results.first_significant.hint else "Could not retrieve data"
+            return results.first_significant.hint if results.first_significant.hint else "Could not retrieve data"
 
     np.Check(
         ActiveMqQueueAge(args.queue) if args.queue else ActiveMqQueueAge(),
@@ -216,8 +223,7 @@ def queue_size(args):
                     return
                 for queue in json.loads(queues_json['value'])['data']:
                     queue_name = queue['name']
-                    if (self.pattern and fnmatch.fnmatch(queue_name, self.pattern)
-                            or not self.pattern):
+                    if self.pattern and fnmatch.fnmatch(queue_name, self.pattern) or not self.pattern:
                         yield np.Metric('Queue Size of %s' % queue_name,
                                         int(queue['messageCount']), min=0, context='size')
             except IOError as e:
@@ -277,92 +283,6 @@ def health(args):
     ).main(timeout=args_timeout)
 
 
-def subscriber(args):
-    """ There are several internal error codes for the subscriber module:
-        -1   Miscellaneous Error (network, json, key value)
-        -2   Topic Name is invalid / doesn't exist
-        -3   Topic has no Subscribers
-        -4   Client ID is invalid / doesn't exist
-        True/False aren't error codes, but the result whether clientId is an
-        active subscriber of topic.
-    """
-
-    class ActiveMqSubscriberContext(np.Context):
-        def evaluate(self, metric, resource):
-            if metric.value == -1:  # Network or JSON Error
-                return self.result_cls(np.Unknown, metric=metric)
-            elif metric.value == -2:  # Topic doesn't exist
-                return self.result_cls(np.Critical, metric=metric)
-            elif metric.value == -3:  # Topic has no subscribers
-                return self.result_cls(np.Critical, metric=metric)
-            elif metric.value == -4:  # Client invalid
-                return self.result_cls(np.Critical, metric=metric)
-            elif metric.value:
-                return self.result_cls(np.Ok, metric=metric)
-            elif not metric.value:
-                return self.result_cls(np.Warn, metric=metric)
-            else:
-                return self.result_cls(np.Critical, metric=metric)
-
-        def describe(self, metric):
-            if metric.value == -1:
-                return 'ERROR: ' + metric.name
-            elif metric.value == -2:
-                return 'Topic ' + args.topic + ' IS INVALID / DOES NOT EXIST'
-            elif metric.value == -3:
-                return 'Topic ' + args.topic + ' HAS NO SUBSCRIBERS'
-            elif metric.value == -4:
-                return 'Subscriber ID ' + args.clientId + ' IS INVALID / DOES NOT EXIST'
-            return ('Client ' + args.clientId + ' is an '
-                    + ('active' if metric.value == True else 'INACTIVE')
-                    + ' subscriber of Topic ' + args.topic)
-
-    class ActiveMqSubscriber(np.Resource):
-        def probe(self):
-            try:
-                resp = load_json(topic_url(args, args.topic))
-
-                if resp['status'] != 200:  # None -> Topic doesn't exist
-                    return np.Metric('subscription', -2, context='subscriber')
-
-                subs = resp['value']['Subscriptions']  # Subscriptions for Topic
-
-                def client_is_active_subscriber(subscription):
-                    subUrl = make_url(args, urllib3.quote(subscription['objectName']))
-                    subResp = load_json(subUrl)  # get the subscription
-
-                    if subResp['value']['DestinationName'] != args.topic:  # should always hold
-                        return -2  # Topic is invalid / doesn't exist
-                    if subResp['value']['ClientId'] != args.clientId:  # subscriber ID check
-                        return -4  # clientId invalid
-                    return subResp['value']['Active']  # subscribtion active?
-
-                # check if clientId is among the subscribers
-                analyze = [client_is_active_subscriber(s) for s in subs]
-                if not analyze:
-                    return np.Metric('subscription', -3, context='subscriber')
-                if -2 in analyze:  # should never occur, just for safety
-                    return np.Metric('subscription', -2, context='subscriber')
-                elif True in analyze:  # active subscriber
-                    return np.Metric('subscription', True, context='subscriber')
-                elif False in analyze:  # INACTIVE subscriber
-                    return np.Metric('subscription', False, context='subscriber')
-                elif -4 in analyze:  # all clients failed
-                    return np.Metric('subscription', -4, context='subscriber')
-
-            except IOError as e:
-                return np.Metric('Fetching network FAILED: ' + str(e), -1, context='subscriber')
-            except ValueError as e:
-                return np.Metric('Decoding Json FAILED: ' + str(e), -1, context='subscriber')
-            except KeyError as e:
-                return np.Metric('Getting Values FAILED: ' + str(e), -1, context='subscriber')
-
-    np.Check(
-        ActiveMqSubscriber(),
-        ActiveMqSubscriberContext('subscriber')
-    ).main(timeout=args_timeout)
-
-
 def exists(args):
     class ActiveMqExistsContext(np.Context):
         def evaluate(self, metric, resource):
@@ -406,55 +326,6 @@ def exists(args):
     np.Check(
         ActiveMqExists(),
         ActiveMqExistsContext('exists')
-    ).main(timeout=args_timeout)
-
-
-def subscriber_pending(args):
-    """ Mix from queuesize and subscriber check.
-        Check that the given clientId is a subscriber of the given Topic.
-        Also check
-    """
-
-    class ActiveMqSubscriberPendingContext(np.ScalarContext):
-        def evaluate(self, metric, resource):
-            if metric.value < 0:
-                return self.result_cls(np.Critical, metric=metric)
-            return super(ActiveMqSubscriberPendingContext, self).evaluate(metric, resource)
-
-        def describe(self, metric):
-            if metric.value < 0:
-                return 'ERROR: ' + metric.name
-            return super(ActiveMqSubscriberPendingContext, self).describe(metric)
-
-    class ActiveMqSubscriberPending(np.Resource):
-        def probe(self):
-            try:
-                resp = load_json(query_url(args))
-                subs = (resp['value']['TopicSubscribers'] +
-                        resp['value']['InactiveDurableTopicSubscribers'])
-                for sub in subs:
-                    qJ = load_json(make_url(args, sub['objectName']))['value']
-                    if not qJ['SubscriptionName'] == args.subscription:
-                        continue  # skip subscriber
-                    if not qJ['ClientId'] == args.clientId:
-                        # When this if is entered, we have found the correct
-                        # subscription, but the clientId doesn't match
-                        return np.Metric('ClientId error: Expected: %s. Got: %s'
-                                         % (args.clientId, qJ['ClientId']),
-                                         -1, context='subscriber_pending')
-                    return np.Metric('Pending Messages for %s' % qJ['SubscriptionName'],
-                                     qJ['PendingQueueSize'], min=0,
-                                     context='subscriber_pending')
-            except IOError as e:
-                return np.Metric('Fetching network FAILED: ' + str(e), -1, context='subscriber_pending')
-            except ValueError as e:
-                return np.Metric('Decoding Json FAILED: ' + str(e), -1, context='subscriber_pending')
-            except KeyError as e:
-                return np.Metric('Getting Subscriber FAILED: ' + str(e), -1, context='subscriber_pending')
-
-    np.Check(
-        ActiveMqSubscriberPending(),
-        ActiveMqSubscriberPendingContext('subscriber_pending', args.warn, args.crit),
     ).main(timeout=args_timeout)
 
 
@@ -570,7 +441,6 @@ def main():
                             help='Name of your broker. (default: %(default)s)')
     connection.add_argument('--url-tail',
                             default='console/jolokia',
-                            # default='hawtio/jolokia/read',
                             help='Jolokia URL tail part. (default: %(default)s)')
     connection.add_argument('-j', '--jolokia-url',
                             help='''Override complete Jolokia URL.
@@ -624,16 +494,6 @@ def main():
     # no additional arguments necessary
     parser_health.set_defaults(func=health)
 
-    # Sub-Parser for subscriber
-    parser_subscriber = subparsers.add_parser('subscriber',
-                                              help="""Check Subscriber: This mode checks if the given 'clientId'
-                is a subscriber of the specified 'topic'.""")
-    parser_subscriber.add_argument('--clientId', required=True,
-                                   help='Client ID of the client that will be checked')
-    parser_subscriber.add_argument('topic',
-                                   help='Name of the Topic that will be checked.')
-    parser_subscriber.set_defaults(func=subscriber)
-
     # Sub-Parser for exists
     parser_exists = subparsers.add_parser('exists',
                                           help="""Check Exists: This mode checks if a Queue or Topic with the
@@ -643,20 +503,6 @@ def main():
     parser_exists.add_argument('--name', required=True,
                                help='Name of the Queue or Topic that will be checked.')
     parser_exists.set_defaults(func=exists)
-
-    # Sub-Parser for queuesize-subscriber
-    parser_subscriber_pending = subparsers.add_parser('subscriber-pending',
-                                                      help="""Check Subscriber-Pending:
-                This mode checks that the given subscriber doesn't have
-                too many pending messages (specified with -w and -c)
-                and that the given clientId the Id that is involved in
-                the subscription.""")
-    parser_subscriber_pending.add_argument('--subscription', required=True,
-                                           help='Name of the subscription thath will be checked.')
-    parser_subscriber_pending.add_argument('--clientId', required=True,
-                                           help='The ID of the client that is involved in the specified subscription.')
-    add_warn_crit(parser_subscriber_pending, 'Pending Messages')
-    parser_subscriber_pending.set_defaults(func=subscriber_pending)
 
     # Sub-Parser for dlq
     parser_dlq = subparsers.add_parser('dlq',
